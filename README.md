@@ -74,6 +74,7 @@ delete or overwrite real user data.
 
 ```
 cd web
+$env:VITE_API_URL = "/"
 npm run build
 cd ..
 uvicorn backend.main:app --port 8000
@@ -83,9 +84,13 @@ Open http://localhost:8000. The backend serves the built app from `web/dist`.
 
 ## Deploy frontend to Vercel and backend to Render
 
-The root `vercel.json` builds only the React/Vite app. Deploy this repository
-to Vercel with the repository root as the project root. The build uses
-`npm --prefix web ci` and `npm --prefix web run build`.
+Deploy the repository to Vercel and set **Root Directory** to `web`. Set
+**Framework Preset** to **Vite** (not FastAPI), **Install Command** to
+`npm ci`, **Build Command** to `npm run build`, and **Output Directory** to
+`dist`. The `web/vercel.json` contains the same frontend-only settings and
+SPA rewrite. The root `vercel.json` is also static-only for deployments whose
+Root Directory is the repository root; neither file registers a Python
+function.
 
 Deploy the backend and managed PostgreSQL database using the included
 `render.yaml` Blueprint. The Render service uses:
@@ -105,7 +110,11 @@ In the Render service settings, set:
 
 After Render deploys, set the Vercel environment variable `VITE_API_URL` to
 the Render service URL (for example `https://herrhythm-api.onrender.com`, with
-no trailing slash) for Production and redeploy the frontend.
+no trailing slash) for Production, Preview, and Development as applicable,
+then redeploy the frontend. Production API requests now fail with a clear
+configuration error rather than falling back to the Vercel frontend origin if
+this variable is missing. In the Vercel project, also confirm the Production
+Branch is `main` and redeploy the latest commit with the build cache cleared.
 
 `DATABASE_URL` is supplied by Render from the managed PostgreSQL database.
 Local development continues to default to `sqlite:///./cycle_ai.db`. Existing

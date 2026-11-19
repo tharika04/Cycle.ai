@@ -1,8 +1,14 @@
 // Thin client for the HerRhythm FastAPI backend.
-// In dev the backend runs on :8000; in production the backend serves this app, so paths are same-origin.
-const configuredApiUrl = (import.meta.env.VITE_API_URL ?? "").trim().replace(/\/+$/, "");
-export const API_URL =
-  configuredApiUrl || (import.meta.env.DEV ? "http://127.0.0.1:8000" : "");
+// In production, VITE_API_URL must point to the separately deployed backend.
+const configuredApiUrl = (import.meta.env.VITE_API_URL ?? "").trim();
+const sameOriginApi = configuredApiUrl === "/";
+const normalizedApiUrl = configuredApiUrl.replace(/\/+$/, "");
+const absoluteApiUrl = /^https?:\/\/[^/]+/i.test(normalizedApiUrl);
+const secureProductionApiUrl = normalizedApiUrl.startsWith("https://");
+const fallbackApiUrl = import.meta.env.DEV ? "http://127.0.0.1:8000" : sameOriginApi ? "" : null;
+export const API_URL = absoluteApiUrl && (import.meta.env.DEV || secureProductionApiUrl)
+  ? normalizedApiUrl
+  : fallbackApiUrl;
 
 const TOKEN_KEY = "hr_token";
 
@@ -29,6 +35,9 @@ export function setUnauthorizedHandler(fn) {
 }
 
 async function request(method, path, { body, form, params, raw } = {}) {
+  if (API_URL === null) {
+    throw new Error("Backend URL is not configured. Set VITE_API_URL to the Render API URL in Vercel.");
+  }
   let url = API_URL + path;
   if (params) {
     const q = new URLSearchParams(params).toString();
@@ -98,7 +107,7 @@ export const api = {
   emailReminders: () => request("POST", "/wellness/reminders/email", { body: {} }),
   insights: () => request("GET", "/account/insights"),
   routines: () => request("GET", "/routines"),
-  figureUrl: (name) => API_URL + "/routines/figure/" + name,
+  figureUrl: (name) => API_URL === null ? null : API_URL + "/routines/figure/" + name,
 
   // chat
   chat: (message, language, conversation_id) =>
