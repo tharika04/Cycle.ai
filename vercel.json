@@ -1,16 +1,12 @@
 
 {
-  "version": 2,
-  "builds": [
+  "installCommand": "npm --prefix web ci",
+  "buildCommand": "npm --prefix web run build",
+  "outputDirectory": "web/dist",
+  "rewrites": [
     {
-      "src": "backend/main.py",
-      "use": "@vercel/python"
-    }
-  ],
-  "routes": [
-    {
-      "src": "/(.*)",
-      "dest": "backend/main.py"
+      "source": "/(.*)",
+      "destination": "/index.html"
     }
   ]
 }

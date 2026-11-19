@@ -12,6 +12,11 @@ pip install -r requirements.txt
 uvicorn backend.main:app --reload --port 8000
 ```
 
+`requirements.txt` contains the FastAPI runtime dependencies. The complete
+dependency set for the archived Streamlit frontend is retained in
+`requirements-legacy.txt`; install that file only if you need to run the old
+Streamlit frontend (`pip install -r requirements-legacy.txt`).
+
 Terminal 2 – web app:
 
 ```
@@ -75,6 +80,41 @@ uvicorn backend.main:app --port 8000
 ```
 
 Open http://localhost:8000. The backend serves the built app from `web/dist`.
+
+## Deploy frontend to Vercel and backend to Render
+
+The root `vercel.json` builds only the React/Vite app. Deploy this repository
+to Vercel with the repository root as the project root. The build uses
+`npm --prefix web ci` and `npm --prefix web run build`.
+
+Deploy the backend and managed PostgreSQL database using the included
+`render.yaml` Blueprint. The Render service uses:
+
+```
+pip install -r requirements.txt
+uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+```
+
+In the Render service settings, set:
+
+- `FRONTEND_ORIGINS` to the exact Vercel production origin, for example
+  `https://your-project.vercel.app` (no trailing slash). Add additional
+  preview/custom origins as comma-separated exact origins when needed.
+- `GEMINI_API_KEY` to your Gemini key.
+- SMTP settings if email reminders are enabled.
+
+After Render deploys, set the Vercel environment variable `VITE_API_URL` to
+the Render service URL (for example `https://herrhythm-api.onrender.com`, with
+no trailing slash) for Production and redeploy the frontend.
+
+`DATABASE_URL` is supplied by Render from the managed PostgreSQL database.
+Local development continues to default to `sqlite:///./cycle_ai.db`. Existing
+local SQLite records are not automatically copied to the production database;
+import them separately if they need to be retained.
+
+For local development, set `JWT_SECRET` to a long random value in `.env`.
+Render generates this value automatically. Do not commit `.env` or paste
+production secrets into source files.
 
 ## App flow
 

@@ -1,7 +1,8 @@
 // Thin client for the HerRhythm FastAPI backend.
 // In dev the backend runs on :8000; in production the backend serves this app, so paths are same-origin.
+const configuredApiUrl = (import.meta.env.VITE_API_URL ?? "").trim().replace(/\/+$/, "");
 export const API_URL =
-  import.meta.env.VITE_API_URL ?? (import.meta.env.DEV ? "http://127.0.0.1:8000" : "");
+  configuredApiUrl || (import.meta.env.DEV ? "http://127.0.0.1:8000" : "");
 
 const TOKEN_KEY = "hr_token";
 

@@ -1,5 +1,6 @@
 
 import importlib
+import os
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -58,19 +59,26 @@ app = FastAPI(title="HerRhythm")
 # CORS CONFIGURATION
 # --------------------------------------------------
 
+local_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://192.168.1.5:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
+    "http://192.168.1.5:5174",
+    "http://localhost:5175",
+    "http://127.0.0.1:5175",
+    "http://192.168.1.5:5175",
+]
+configured_origins = [
+    origin.strip().rstrip("/")
+    for origin in os.getenv("FRONTEND_ORIGINS", "").split(",")
+    if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://192.168.1.5:5173",
-        "http://localhost:5174",
-        "http://127.0.0.1:5174",
-        "http://192.168.1.5:5174",
-        "http://localhost:5175",
-        "http://127.0.0.1:5175",
-        "http://192.168.1.5:5175",
-    ],
+    allow_origins=list(dict.fromkeys(local_origins + configured_origins)),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
