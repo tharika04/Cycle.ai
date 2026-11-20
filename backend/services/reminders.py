@@ -1,5 +1,7 @@
-import os
 import json
+import logging
+import os
+import re
 from datetime import date
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -18,6 +20,14 @@ PHASE_TIPS = {
 }
 WATER_TARGET = 8
 RESEND_API_URL = "https://api.resend.com/emails"
+logger = logging.getLogger(__name__)
+_EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
+_BEARER_RE = re.compile(r"(?i)\bBearer\s+\S+")
+_API_KEY_RE = re.compile(r"\bre_[A-Za-z0-9_-]+\b")
+_HEALTH_CONTENT_RE = re.compile(
+    r"(?i)\b(?:health|symptom|cycle|period|menstrual|pregnan(?:t|cy)|"
+    r"ovulation|fertile|cramp|bleed(?:ing)?|pain|medication|diagnos(?:is|ed))\b"
+)
 
 
 def _item(kind, title, message):
@@ -80,6 +90,82 @@ def reminders_to_text(items, name):
     return "\n".join(lines)
 
 
+def _resend_error_info(error, api_key):
+    try:
+        raw_body = error.read(8192).decode("utf-8", errors="replace")
+        response = json.loads(raw_body)
+    except (OSError, ValueError):
+        raw_body = ""
+        response = {}
+    if not isinstance(response, dict):
+        response = {}
+
+    safe_body = {}
+    for key in ("statusCode", "name", "code", "message"):
+        value = response.get(key)
+        if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+            if isinstance(value, str):
+                if _HEALTH_CONTENT_RE.search(value):
+                    value = "[redacted sensitive content]"
+                else:
+                    value = _EMAIL_RE.sub("[redacted email]", value)
+                    value = _BEARER_RE.sub("Bearer [redacted]", value)
+                    value = _API_KEY_RE.sub("[redacted API key]", value)
+                    if api_key:
+                        value = value.replace(api_key, "[redacted API key]")
+            safe_body[key] = value
+    safe_keys = {"statusCode", "name", "code", "message"}
+    raw_body_is_safe = (
+        raw_body
+        and set(response).issubset(safe_keys)
+        and not _EMAIL_RE.search(raw_body)
+        and not _BEARER_RE.search(raw_body)
+        and not _API_KEY_RE.search(raw_body)
+        and not _HEALTH_CONTENT_RE.search(raw_body)
+        and (not api_key or api_key not in raw_body)
+    )
+    response_body = (
+        raw_body if raw_body_is_safe else
+        json.dumps(safe_body, separators=(",", ":"), ensure_ascii=True)
+    )
+    if not safe_body and raw_body:
+        response_body = "[redacted unrecognized response body]"
+
+    error_type = response.get("name") or response.get("code") or "unspecified"
+    safe_error_types = {
+        "application_error",
+        "invalid_api_key",
+        "internal_server_error",
+        "missing_api_key",
+        "rate_limit_exceeded",
+        "restricted_api_key",
+        "validation_error",
+    }
+    if not isinstance(error_type, str) or error_type not in safe_error_types:
+        error_type = "unspecified"
+
+    provider_message = response.get("message", "")
+    if not isinstance(provider_message, str):
+        provider_message = ""
+    provider_message = provider_message.lower()
+
+    if (
+        "testing emails" in provider_message
+        and ("own email" in provider_message or "only send" in provider_message)
+    ):
+        category = "test_recipient_restriction"
+    elif error.code == 401:
+        category = "authentication"
+    elif error.code == 429:
+        category = "rate_limited"
+    elif error.code in (400, 403, 422):
+        category = "sender_or_request_rejected"
+    else:
+        category = "provider_failure"
+
+    return error_type, category, response_body
+
+
 def send_email(to_addr, subject, body):
     api_key = os.getenv("RESEND_API_KEY", "").strip()
     from_email = os.getenv("RESEND_FROM_EMAIL", "").strip()
@@ -106,22 +192,41 @@ def send_email(to_addr, subject, body):
     )
 
     try:
-        with urlopen(request, timeout=20):
-            pass
+        with urlopen(request, timeout=20) as response:
+            logger.info("Resend email API request accepted: status=%s", response.status)
     except HTTPError as exc:
-        if exc.code == 401:
-            message = "Email service authentication failed. Check RESEND_API_KEY."
-        elif exc.code in (400, 403, 422):
+        error_type, category, response_body = _resend_error_info(exc, api_key)
+        logger.warning(
+            "Resend email API rejected request: status=%d error_type=%s "
+            "category=%s response_body=%s",
+            exc.code,
+            error_type,
+            category,
+            response_body,
+        )
+        if category == "test_recipient_restriction":
             message = (
-                "Resend rejected the configured sender. Verify the sender/domain "
-                "in Resend and check RESEND_FROM_EMAIL."
+                "Resend's onboarding sender can only send test emails to the email "
+                "address on your Resend account. To email other users, verify a "
+                "domain in Resend and set RESEND_FROM_EMAIL to an address on it."
             )
-        elif exc.code == 429:
+        elif category == "authentication":
+            message = "Email service authentication failed. Check RESEND_API_KEY."
+        elif category == "sender_or_request_rejected":
+            message = (
+                "Resend rejected the email request. Check that RESEND_FROM_EMAIL "
+                "uses a verified sender and try again."
+            )
+        elif category == "rate_limited":
             message = "The email service is temporarily rate-limited. Please try again later."
         else:
             message = "The email service couldn't send your reminder. Please try again later."
         raise EmailDeliveryError(message) from None
-    except (URLError, TimeoutError, OSError):
+    except (URLError, TimeoutError, OSError) as exc:
+        logger.warning(
+            "Resend email API request failed before an HTTP response: error_type=%s",
+            type(exc).__name__,
+        )
         raise EmailDeliveryError(
             "The email service couldn't be reached. Please try again later."
         ) from None
