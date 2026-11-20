@@ -91,14 +91,27 @@ def reminders_to_text(items, name):
 
 
 def _resend_error_info(error, api_key):
+    body_read_error = False
     try:
-        raw_body = error.read(8192).decode("utf-8", errors="replace")
-        response = json.loads(raw_body)
-    except (OSError, ValueError):
-        raw_body = ""
+        raw_bytes = error.read(8192)
+    except OSError:
+        raw_bytes = b""
+        body_read_error = True
+
+    raw_body = raw_bytes.decode("utf-8", errors="replace")
+    if not raw_bytes:
         response = {}
+        body_state = "read_error" if body_read_error else "empty"
+    else:
+        try:
+            response = json.loads(raw_body)
+            body_state = "json"
+        except ValueError:
+            response = {}
+            body_state = "non_json"
     if not isinstance(response, dict):
         response = {}
+        body_state = "json_non_object"
 
     safe_body = {}
     for key in ("statusCode", "name", "code", "message"):
@@ -163,7 +176,7 @@ def _resend_error_info(error, api_key):
     else:
         category = "provider_failure"
 
-    return error_type, category, response_body
+    return error_type, category, response_body, body_state, len(raw_bytes)
 
 
 def send_email(to_addr, subject, body):
@@ -195,13 +208,18 @@ def send_email(to_addr, subject, body):
         with urlopen(request, timeout=20) as response:
             logger.info("Resend email API request accepted: status=%s", response.status)
     except HTTPError as exc:
-        error_type, category, response_body = _resend_error_info(exc, api_key)
+        error_type, category, response_body, body_state, body_bytes = (
+            _resend_error_info(exc, api_key)
+        )
         logger.warning(
             "Resend email API rejected request: status=%d error_type=%s "
-            "category=%s response_body=%s",
+            "category=%s response_body_state=%s response_body_bytes=%d "
+            "response_body=%s",
             exc.code,
             error_type,
             category,
+            body_state,
+            body_bytes,
             response_body,
         )
         if category == "test_recipient_restriction":

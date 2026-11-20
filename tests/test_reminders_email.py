@@ -32,6 +32,16 @@ class SendEmailTests(unittest.TestCase):
             io.BytesIO(body),
         )
 
+    @staticmethod
+    def raw_http_error(status, body):
+        return HTTPError(
+            reminders.RESEND_API_URL,
+            status,
+            "Provider error",
+            {},
+            io.BytesIO(body),
+        )
+
     @patch("backend.services.reminders.urlopen")
     def test_sends_existing_content_through_resend(self, urlopen):
         urlopen.return_value.__enter__.return_value.status = 200
@@ -132,6 +142,29 @@ class SendEmailTests(unittest.TestCase):
                 self.assertIn("response_body=" + expected_body, logs.output[0])
                 self.assertNotIn("re_test_secret", logs.output[0])
                 self.assertNotIn("Bearer", logs.output[0])
+
+    @patch("backend.services.reminders.urlopen")
+    def test_empty_and_unparseable_provider_bodies_are_distinguished(self, urlopen):
+        cases = [
+            (b"", "response_body_state=empty", "response_body_bytes=0"),
+            (
+                b"private non-json response",
+                "response_body_state=non_json",
+                "response_body_bytes=25",
+            ),
+        ]
+        for body, expected_state, expected_size in cases:
+            with self.subTest(expected_state=expected_state):
+                urlopen.side_effect = self.raw_http_error(403, body)
+
+                with self.assertLogs("backend.services.reminders", level="WARNING") as logs:
+                    with self.assertRaises(reminders.EmailDeliveryError):
+                        reminders.send_email("person@example.test", "subject", "body")
+
+                self.assertIn(expected_state, logs.output[0])
+                self.assertIn(expected_size, logs.output[0])
+                self.assertIn("error_type=unspecified", logs.output[0])
+                self.assertNotIn("private non-json response", logs.output[0])
 
     @patch("backend.services.reminders.urlopen")
     def test_provider_failure_does_not_expose_raw_error(self, urlopen):
