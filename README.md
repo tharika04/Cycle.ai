@@ -42,20 +42,18 @@ Never commit `.env`; it is ignored by Git.
 
 ### Enable email reminders
 
-Add these values to the project-root `.env` file, then restart FastAPI:
+Create a Resend API key and verify the sender domain/address in Resend. Add the
+following values to the project-root `.env` file, then restart FastAPI. Replace
+the sender placeholder with an address on your verified domain:
 
 ```env
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-SMTP_USER=your Gmail address
-SMTP_PASSWORD=your 16-character Google app password
-SMTP_FROM=your Gmail address
+RESEND_API_KEY=re_your_resend_api_key
+RESEND_FROM_EMAIL=Your App <reminders@your-verified-domain.example>
 ```
 
-For Gmail, enable 2-Step Verification and create an **App password** in your
-Google Account. Do not use your regular Gmail password. Other providers need
-their SMTP host and port. If port 587 is blocked, use `SMTP_PORT=465`; the
-application will use Gmail's direct SSL connection automatically.
+The address configured by `RESEND_FROM_EMAIL` must be allowed by your verified
+Resend domain; do not use the example placeholder as-is. Email reminders remain
+unavailable until both variables are configured.
 
 ## Seed demo data
 
@@ -106,7 +104,8 @@ In the Render service settings, set:
   `https://your-project.vercel.app` (no trailing slash). Add additional
   preview/custom origins as comma-separated exact origins when needed.
 - `GEMINI_API_KEY` to your Gemini key.
-- SMTP settings if email reminders are enabled.
+- `RESEND_API_KEY` and `RESEND_FROM_EMAIL` if email reminders are enabled. The
+  sender must belong to a domain verified in Resend.
 
 After Render deploys, set the Vercel environment variable `VITE_API_URL` to
 the Render service URL (for example `https://herrhythm-api.onrender.com`, with

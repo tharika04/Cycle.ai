@@ -6,7 +6,13 @@ from sqlalchemy.orm import Session
 from backend import models
 from backend.auth import get_current_user
 from backend.database import get_db
-from backend.services.reminders import build_reminders, reminders_to_text, send_email
+from backend.services.reminders import (
+    EmailConfigurationError,
+    EmailDeliveryError,
+    build_reminders,
+    reminders_to_text,
+    send_email,
+)
 from backend.services.screening import screen
 
 router = APIRouter(prefix="/wellness", tags=["wellness"])
@@ -43,9 +49,9 @@ def email_reminders(db: Session = Depends(get_db), user: models.User = Depends(g
     body = reminders_to_text(build_reminders(cycles, logs), user.name)
     try:
         send_email(user.email, "Your HerRhythm reminders", body)
-    except RuntimeError as e:
+    except EmailConfigurationError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=502, detail="Could not send the email: " + str(e)[:150])
+    except EmailDeliveryError as e:
+        raise HTTPException(status_code=502, detail=str(e))
     _last_email[user.id] = now
     return {"sent": True, "to": mask_email(user.email)}

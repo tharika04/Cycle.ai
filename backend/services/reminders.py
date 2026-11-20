@@ -1,8 +1,9 @@
 import os
-import smtplib
+import json
 from datetime import date
-from email.message import EmailMessage
 from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from dotenv import load_dotenv
 from backend.services.predictor import predict
@@ -16,6 +17,7 @@ PHASE_TIPS = {
     "luteal": "PMS may show up. Plan lighter days and protect your sleep.",
 }
 WATER_TARGET = 8
+RESEND_API_URL = "https://api.resend.com/emails"
 
 
 def _item(kind, title, message):
@@ -79,39 +81,55 @@ def reminders_to_text(items, name):
 
 
 def send_email(to_addr, subject, body):
-    host = os.getenv("SMTP_HOST")
-    try:
-        port = int(os.getenv("SMTP_PORT", "587"))
-    except ValueError as exc:
-        raise RuntimeError("SMTP_PORT must be a number, usually 587.") from exc
-    user = os.getenv("SMTP_USER")
-    password = os.getenv("SMTP_PASSWORD", "").replace(" ", "")
-    if not (host and user and password):
-        raise RuntimeError(
-            "Email is not set up yet. Add SMTP_HOST, SMTP_PORT, SMTP_USER, "
-            "SMTP_PASSWORD, and SMTP_FROM to the project root .env, then restart the backend."
+    api_key = os.getenv("RESEND_API_KEY", "").strip()
+    from_email = os.getenv("RESEND_FROM_EMAIL", "").strip()
+    if not api_key or not from_email:
+        raise EmailConfigurationError(
+            "Email reminders aren't configured. Set RESEND_API_KEY and "
+            "RESEND_FROM_EMAIL, then restart the backend."
         )
 
-    msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["From"] = os.getenv("SMTP_FROM", user)
-    msg["To"] = to_addr
-    msg.set_content(body)
+    payload = json.dumps({
+        "from": from_email,
+        "to": [to_addr],
+        "subject": subject,
+        "text": body,
+    }).encode("utf-8")
+    request = Request(
+        RESEND_API_URL,
+        data=payload,
+        headers={
+            "Authorization": "Bearer " + api_key,
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
 
     try:
-        smtp_class = smtplib.SMTP_SSL if port == 465 else smtplib.SMTP
-        with smtp_class(host, port, timeout=20) as server:
-            if port != 465:
-                server.starttls()
-            server.login(user, password)
-            server.send_message(msg)
-    except smtplib.SMTPAuthenticationError as exc:
-        raise RuntimeError(
-            "SMTP authentication failed. For Gmail, use a 16-character Google "
-            "App Password with 2-Step Verification enabled."
-        ) from exc
-    except (OSError, smtplib.SMTPException) as exc:
-        raise RuntimeError(
-            "SMTP connection failed for " + host + ":" + str(port) +
-            ". Check the SMTP host/port and network connection."
-        ) from exc
+        with urlopen(request, timeout=20):
+            pass
+    except HTTPError as exc:
+        if exc.code == 401:
+            message = "Email service authentication failed. Check RESEND_API_KEY."
+        elif exc.code in (400, 403, 422):
+            message = (
+                "Resend rejected the configured sender. Verify the sender/domain "
+                "in Resend and check RESEND_FROM_EMAIL."
+            )
+        elif exc.code == 429:
+            message = "The email service is temporarily rate-limited. Please try again later."
+        else:
+            message = "The email service couldn't send your reminder. Please try again later."
+        raise EmailDeliveryError(message) from None
+    except (URLError, TimeoutError, OSError):
+        raise EmailDeliveryError(
+            "The email service couldn't be reached. Please try again later."
+        ) from None
+
+
+class EmailConfigurationError(RuntimeError):
+    pass
+
+
+class EmailDeliveryError(RuntimeError):
+    pass
