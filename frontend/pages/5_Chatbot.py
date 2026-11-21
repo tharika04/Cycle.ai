@@ -42,16 +42,28 @@ def open_chat(conv_id):
     st.session_state["chat"] = chat
 
 
+def refresh_convs():
+    """Reload the past-chats list from the backend. Called only when it can change."""
+    try:
+        st.session_state["convs"] = api.get_conversations()
+    except Exception:
+        st.session_state.setdefault("convs", [])
+
+
 if "conv_id" not in st.session_state:
     start_new_chat()
 
-phase = "follicular"
-try:
-    pred = api.get_prediction()
-    if pred.get("status") == "ok":
-        phase = "luteal" if pred["current_phase"] == "late" else pred["current_phase"]
-except Exception:
-    pass
+# Current cycle phase: fetched once per session, not on every rerun.
+if "phase" not in st.session_state:
+    phase = "follicular"
+    try:
+        pred = api.get_prediction()
+        if pred.get("status") == "ok":
+            phase = "luteal" if pred["current_phase"] == "late" else pred["current_phase"]
+    except Exception:
+        pass
+    st.session_state["phase"] = phase
+phase = st.session_state["phase"]
 
 # ---- Sidebar ----
 language = st.sidebar.selectbox("Reply language", LANGUAGES)
@@ -65,14 +77,14 @@ if st.sidebar.button("Delete this chat", use_container_width=True):
         api.delete_conversation(st.session_state["conv_id"])
     except Exception:
         pass
+    refresh_convs()
     start_new_chat()
     st.rerun()
 
 st.sidebar.markdown("**Past chats**")
-try:
-    convs = api.get_conversations()
-except Exception:
-    convs = []
+if "convs" not in st.session_state:
+    refresh_convs()
+convs = st.session_state["convs"]
 for c in convs[:10]:
     title = c["title"] or "Chat"
     if c["id"] == "legacy":
@@ -110,6 +122,8 @@ if prompt:
         with st.spinner("Thinking..."):
             try:
                 reply = api.send_message(prompt, language, st.session_state["conv_id"])["response"]
+            except requests.exceptions.Timeout:
+                reply = "That took too long. Please try again."
             except requests.exceptions.ConnectionError:
                 reply = "Cannot reach the backend. Is uvicorn running?"
             except Exception as e:
@@ -117,4 +131,6 @@ if prompt:
         st.markdown(reply)
     st.session_state["chat"].append(("assistant", reply))
     if len(st.session_state["chat"]) == 2:
+        # First message of a new chat: the past-chats list now has a new entry.
+        refresh_convs()
         st.rerun()
