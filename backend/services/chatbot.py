@@ -10,8 +10,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(PROJECT_ROOT / ".env")
 
 MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
-FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "")
+FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-flash")
 THINKING = os.getenv("GEMINI_THINKING", "minimal").lower()
+
+# Speed controls (all can be changed from Render's Environment tab, no code edit needed).
+REQUEST_TIMEOUT_MS = int(os.getenv("GEMINI_TIMEOUT_SECONDS", "20")) * 1000
+MAX_OUTPUT_TOKENS = int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "1024"))
+MAX_HISTORY = int(os.getenv("GEMINI_MAX_HISTORY", "8"))
 
 SYSTEM_PROMPT = """You are HerBot, the friendly assistant inside HerRhythm, a menstrual and reproductive health tracker.
 If asked your name, say you are HerBot.
@@ -86,8 +91,23 @@ def _is_missing(error):
     return "404" in text or "NOT_FOUND" in text
 
 
+def _is_timeout(error):
+    text = str(error).lower()
+    name = type(error).__name__
+    return (
+        "timed out" in text
+        or "timeout" in text
+        or "deadline" in text
+        or name in ("ReadTimeout", "ConnectTimeout", "TimeoutException")
+    )
+
+
 def _config(system_text, level):
-    kwargs = {"system_instruction": system_text, "temperature": 0.5}
+    kwargs = {
+        "system_instruction": system_text,
+        "temperature": 0.5,
+        "max_output_tokens": MAX_OUTPUT_TOKENS,
+    }
     if level:
         kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=level)
     return types.GenerateContentConfig(**kwargs)
@@ -104,6 +124,22 @@ def _levels():
     return seen
 
 
+# One client reused across requests: avoids a new connection setup on every message.
+_client = None
+_client_key = None
+
+
+def _get_client(api_key):
+    global _client, _client_key
+    if _client is None or _client_key != api_key:
+        _client = genai.Client(
+            api_key=api_key,
+            http_options=types.HttpOptions(timeout=REQUEST_TIMEOUT_MS),
+        )
+        _client_key = api_key
+    return _client
+
+
 def generate_reply(message, history, context):
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
@@ -112,7 +148,10 @@ def generate_reply(message, history, context):
             "(not .env.example), then restart the backend."
         )
 
-    client = genai.Client(api_key=api_key)
+    client = _get_client(api_key)
+
+    # Only the most recent turns are sent: long history makes every reply slower.
+    history = list(history)[-MAX_HISTORY:]
 
     contents = []
     for h in history:
@@ -122,16 +161,21 @@ def generate_reply(message, history, context):
 
     system_text = SYSTEM_PROMPT + "\n\n" + context
 
+    prompt_chars = len(system_text) + len(message) + sum(
+        len(h.message) + len(h.response) for h in history
+    )
+
     models = [MODEL]
     if FALLBACK_MODEL and FALLBACK_MODEL != MODEL:
         models.append(FALLBACK_MODEL)
 
     last_error = None
-    for model in models:
+    for m_idx, model in enumerate(models):
+        has_next_model = m_idx + 1 < len(models)
         levels = _levels()
         idx = 0
-        busy_tries = 0
-        while busy_tries < 2:
+        tries = 0
+        while tries < 2:
             level = levels[idx]
             started = time.time()
             try:
@@ -139,6 +183,7 @@ def generate_reply(message, history, context):
                     model=model, contents=contents, config=_config(system_text, level)
                 )
                 print("[chat] model=" + model + " thinking=" + str(level)
+                      + " history=" + str(len(history)) + " chars=" + str(prompt_chars)
                       + " took " + str(round(time.time() - started, 1)) + "s", flush=True)
                 text = (response.text or "").strip()
                 return text or "Sorry, I couldn't come up with an answer. Please try rephrasing."
@@ -152,8 +197,15 @@ def generate_reply(message, history, context):
                     continue
                 if _is_missing(e):
                     break
+                if _is_timeout(e):
+                    # A slow call: switch to the fallback model right away if there is one,
+                    # otherwise try once more.
+                    if has_next_model:
+                        break
+                    tries += 1
+                    continue
                 if not _is_busy(e):
                     raise
-                busy_tries += 1
+                tries += 1
                 time.sleep(1)
     raise last_error
