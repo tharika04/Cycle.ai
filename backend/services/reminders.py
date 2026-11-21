@@ -198,8 +198,9 @@ def send_email(to_addr, subject, body):
         RESEND_API_URL,
         data=payload,
         headers={
-            "Authorization": "Bearer " + api_key,
-            "Content-Type": "application/json",
+        "Authorization": "Bearer " + api_key,
+        "Content-Type": "application/json",
+        "User-Agent": "herrhythm/1.0",
         },
         method="POST",
     )
