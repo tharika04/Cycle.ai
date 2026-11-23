@@ -1,5 +1,8 @@
+import json
 import os
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -24,6 +27,16 @@ MAX_OUTPUT_TOKENS = int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "1024"))
 MAX_HISTORY = int(os.getenv("GEMINI_MAX_HISTORY", "8"))
 ROUNDS = int(os.getenv("GEMINI_ROUNDS", "2"))  # how many times to run through all models
 MAX_TOTAL_SECONDS = int(os.getenv("GEMINI_MAX_TOTAL_SECONDS", "45"))  # give up after this long
+
+# Backup provider (Groq). Used only when Gemini fails. Set GROQ_API_KEY on Render to enable it.
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_TIMEOUT = int(os.getenv("GROQ_TIMEOUT_SECONDS", "20"))
+# Reasoning models (like openai/gpt-oss-*) spend part of the token limit on thinking, so allow more.
+GROQ_MAX_TOKENS = int(os.getenv("GROQ_MAX_TOKENS", "1500"))
+# "low" makes gpt-oss models answer much faster. Only sent to gpt-oss models unless you set it yourself.
+GROQ_REASONING_EFFORT = os.getenv("GROQ_REASONING_EFFORT") or ("low" if "gpt-oss" in GROQ_MODEL else "")
+# When Groq is enabled, Gemini gets only this many seconds before we switch to Groq.
+GEMINI_BUDGET_WITH_BACKUP = int(os.getenv("GEMINI_BUDGET_SECONDS", "15"))
 
 # Remembers which thinking level each model accepted, so we do not repeat a failed attempt.
 _level_cache = {}
@@ -158,7 +171,7 @@ def _give_up(error):
     raise error
 
 
-def generate_reply(message, history, context):
+def _generate_gemini(message, history, context):
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError(
@@ -185,9 +198,12 @@ def generate_reply(message, history, context):
 
     models = [MODEL] + [m for m in FALLBACK_MODELS if m != MODEL]
 
-    deadline = time.time() + MAX_TOTAL_SECONDS
+    backup = bool(os.getenv("GROQ_API_KEY"))
+    budget = min(MAX_TOTAL_SECONDS, GEMINI_BUDGET_WITH_BACKUP) if backup else MAX_TOTAL_SECONDS
+    rounds = 1 if backup else ROUNDS
+    deadline = time.time() + budget
     last_error = None
-    for round_no in range(ROUNDS):
+    for round_no in range(rounds):
         if round_no > 0:
             time.sleep(3)  # short pause before going through the models again
         for m_idx, model in enumerate(models):
@@ -199,7 +215,7 @@ def generate_reply(message, history, context):
             tries = 0
             while tries < 2:
                 if last_error is not None and time.time() > deadline:
-                    _give_up(last_error)
+                    raise last_error
                 level = levels[idx]
                 started = time.time()
                 try:
@@ -234,4 +250,64 @@ def generate_reply(message, history, context):
                         break
                     tries += 1
                     time.sleep(2 * tries)
-    _give_up(last_error)
+    raise last_error
+
+
+def _generate_groq(message, history, context):
+    """Backup answer from Groq (OpenAI-compatible API), using only the standard library."""
+    api_key = os.getenv("GROQ_API_KEY")
+    messages = [{"role": "system", "content": SYSTEM_PROMPT + "\n\n" + context}]
+    for h in history:
+        messages.append({"role": "user", "content": h.message})
+        messages.append({"role": "assistant", "content": h.response})
+    messages.append({"role": "user", "content": message})
+
+    body = {
+        "model": GROQ_MODEL,
+        "messages": messages,
+        "temperature": 0.5,
+        "max_tokens": GROQ_MAX_TOKENS,
+    }
+    if GROQ_REASONING_EFFORT:
+        body["reasoning_effort"] = GROQ_REASONING_EFFORT
+    payload = json.dumps(body).encode("utf-8")
+    request = urllib.request.Request(
+        "https://api.groq.com/openai/v1/chat/completions",
+        data=payload,
+        headers={
+            "Authorization": "Bearer " + api_key,
+            "Content-Type": "application/json",
+            "User-Agent": "herrhythm/1.0",  # without this, Cloudflare may reply 403
+        },
+        method="POST",
+    )
+    started = time.time()
+    try:
+        with urllib.request.urlopen(request, timeout=GROQ_TIMEOUT) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read()[:200].decode("utf-8", "replace")
+        raise RuntimeError("Groq error " + str(exc.code) + ": " + detail)
+    text = (data["choices"][0]["message"]["content"] or "").strip()
+    print("[chat] provider=groq model=" + GROQ_MODEL
+          + " took " + str(round(time.time() - started, 1)) + "s", flush=True)
+    return text or "Sorry, I couldn't come up with an answer. Please try rephrasing."
+
+
+def generate_reply(message, history, context):
+    history = list(history)[-MAX_HISTORY:]
+
+    gemini_error = None
+    try:
+        return _generate_gemini(message, history, context)
+    except Exception as e:
+        gemini_error = e
+
+    if os.getenv("GROQ_API_KEY"):
+        print("[chat] Gemini failed, switching to Groq: " + str(gemini_error)[:100], flush=True)
+        try:
+            return _generate_groq(message, history, context)
+        except Exception as e:
+            print("[chat] Groq failed: " + str(e)[:150], flush=True)
+
+    _give_up(gemini_error)
