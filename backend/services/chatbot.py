@@ -22,6 +22,11 @@ THINKING = os.getenv("GEMINI_THINKING", "minimal").lower()
 REQUEST_TIMEOUT_MS = int(os.getenv("GEMINI_TIMEOUT_SECONDS", "20")) * 1000
 MAX_OUTPUT_TOKENS = int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "1024"))
 MAX_HISTORY = int(os.getenv("GEMINI_MAX_HISTORY", "8"))
+ROUNDS = int(os.getenv("GEMINI_ROUNDS", "2"))  # how many times to run through all models
+MAX_TOTAL_SECONDS = int(os.getenv("GEMINI_MAX_TOTAL_SECONDS", "45"))  # give up after this long
+
+# Remembers which thinking level each model accepted, so we do not repeat a failed attempt.
+_level_cache = {}
 
 SYSTEM_PROMPT = """You are HerBot, the friendly assistant inside HerRhythm, a menstrual and reproductive health tracker.
 If asked your name, say you are HerBot.
@@ -146,6 +151,13 @@ def _get_client(api_key):
     return _client
 
 
+def _give_up(error):
+    """Raise a friendly message when Gemini is overloaded, otherwise the original error."""
+    if error is not None and (_is_busy(error) or _is_timeout(error)):
+        raise RuntimeError("HerBot is very busy right now. Please try again in a few seconds.")
+    raise error
+
+
 def generate_reply(message, history, context):
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
@@ -173,47 +185,53 @@ def generate_reply(message, history, context):
 
     models = [MODEL] + [m for m in FALLBACK_MODELS if m != MODEL]
 
+    deadline = time.time() + MAX_TOTAL_SECONDS
     last_error = None
-    for m_idx, model in enumerate(models):
-        has_next_model = m_idx + 1 < len(models)
-        levels = _levels()
-        idx = 0
-        tries = 0
-        while tries < 3:
-            level = levels[idx]
-            started = time.time()
-            try:
-                response = client.models.generate_content(
-                    model=model, contents=contents, config=_config(system_text, level)
-                )
-                print("[chat] model=" + model + " thinking=" + str(level)
-                      + " history=" + str(len(history)) + " chars=" + str(prompt_chars)
-                      + " took " + str(round(time.time() - started, 1)) + "s", flush=True)
-                text = (response.text or "").strip()
-                return text or "Sorry, I couldn't come up with an answer. Please try rephrasing."
-            except Exception as e:
-                last_error = e
-                print("[chat] model=" + model + " thinking=" + str(level)
-                      + " failed after " + str(round(time.time() - started, 1)) + "s: "
-                      + str(e)[:120], flush=True)
-                if level and "thinking" in str(e).lower() and idx + 1 < len(levels):
-                    idx += 1
-                    continue
-                if _is_missing(e):
-                    break
-                if _is_timeout(e):
-                    # A slow call: switch to the fallback model right away if there is one,
-                    # otherwise try once more.
+    for round_no in range(ROUNDS):
+        if round_no > 0:
+            time.sleep(3)  # short pause before going through the models again
+        for m_idx, model in enumerate(models):
+            has_next_model = m_idx + 1 < len(models)
+            levels = _levels()
+            idx = _level_cache.get(model, 0)
+            if idx >= len(levels):
+                idx = 0
+            tries = 0
+            while tries < 2:
+                if last_error is not None and time.time() > deadline:
+                    _give_up(last_error)
+                level = levels[idx]
+                started = time.time()
+                try:
+                    response = client.models.generate_content(
+                        model=model, contents=contents, config=_config(system_text, level)
+                    )
+                    _level_cache[model] = idx
+                    print("[chat] model=" + model + " thinking=" + str(level)
+                          + " history=" + str(len(history)) + " chars=" + str(prompt_chars)
+                          + " took " + str(round(time.time() - started, 1)) + "s", flush=True)
+                    text = (response.text or "").strip()
+                    return text or "Sorry, I couldn't come up with an answer. Please try rephrasing."
+                except Exception as e:
+                    last_error = e
+                    print("[chat] model=" + model + " thinking=" + str(level)
+                          + " failed after " + str(round(time.time() - started, 1)) + "s: "
+                          + str(e)[:120], flush=True)
+                    if level and "thinking" in str(e).lower() and idx + 1 < len(levels):
+                        idx += 1
+                        _level_cache[model] = idx
+                        continue
+                    if _is_missing(e):
+                        break
+                    if _is_timeout(e):
+                        if has_next_model:
+                            break
+                        tries += 1
+                        continue
+                    if not _is_busy(e):
+                        raise
                     if has_next_model:
                         break
                     tries += 1
-                    continue
-                if not _is_busy(e):
-                    raise
-                # Model is overloaded: move to the next model right away if there is one,
-                # otherwise wait a little longer each time and try again.
-                if has_next_model:
-                    break
-                tries += 1
-                time.sleep(2 * tries)
-    raise last_error
+                    time.sleep(2 * tries)
+    _give_up(last_error)
