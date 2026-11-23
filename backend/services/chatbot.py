@@ -9,8 +9,13 @@ from google.genai import types
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(PROJECT_ROOT / ".env")
 
-MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
-FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-flash")
+MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+# One or more fallback models, comma-separated, tried in order if the main model is busy or slow.
+FALLBACK_MODELS = [
+    m.strip()
+    for m in os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.6-flash").split(",")
+    if m.strip()
+]
 THINKING = os.getenv("GEMINI_THINKING", "minimal").lower()
 
 # Speed controls (all can be changed from Render's Environment tab, no code edit needed).
@@ -21,7 +26,8 @@ MAX_HISTORY = int(os.getenv("GEMINI_MAX_HISTORY", "8"))
 SYSTEM_PROMPT = """You are HerBot, the friendly assistant inside HerRhythm, a menstrual and reproductive health tracker.
 If asked your name, say you are HerBot.
 Rules:
-- Be warm, clear, and brief (under 120 words unless asked for more).
+- Be warm, clear, and brief: at most 80 words in 2 short paragraphs, unless the user asks for more detail.
+- Do not introduce yourself or repeat the question. Start with the answer.
 - Give general educational information only. Never diagnose, and never prescribe medicines or doses.
 - Use the user's cycle context below when it is relevant, and mention it naturally.
 - Do not promise that predictions are accurate or reliable for contraception.
@@ -165,9 +171,7 @@ def generate_reply(message, history, context):
         len(h.message) + len(h.response) for h in history
     )
 
-    models = [MODEL]
-    if FALLBACK_MODEL and FALLBACK_MODEL != MODEL:
-        models.append(FALLBACK_MODEL)
+    models = [MODEL] + [m for m in FALLBACK_MODELS if m != MODEL]
 
     last_error = None
     for m_idx, model in enumerate(models):
@@ -175,7 +179,7 @@ def generate_reply(message, history, context):
         levels = _levels()
         idx = 0
         tries = 0
-        while tries < 2:
+        while tries < 3:
             level = levels[idx]
             started = time.time()
             try:
@@ -206,6 +210,10 @@ def generate_reply(message, history, context):
                     continue
                 if not _is_busy(e):
                     raise
+                # Model is overloaded: move to the next model right away if there is one,
+                # otherwise wait a little longer each time and try again.
+                if has_next_model:
+                    break
                 tries += 1
-                time.sleep(1)
+                time.sleep(2 * tries)
     raise last_error
